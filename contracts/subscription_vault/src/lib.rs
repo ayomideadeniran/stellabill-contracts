@@ -38,8 +38,12 @@ pub struct SubscriptionVault;
 impl SubscriptionVault {
     /// Initialize the contract (e.g. set token and admin). Extend as needed.
     pub fn init(env: Env, token: Address, admin: Address) -> Result<(), Error> {
-        env.storage().instance().set(&Symbol::new(&env, "token"), &token);
-        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "token"), &token);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "admin"), &admin);
         Ok(())
     }
 
@@ -77,8 +81,24 @@ impl SubscriptionVault {
         amount: i128,
     ) -> Result<(), Error> {
         subscriber.require_auth();
-        // TODO: transfer USDC from subscriber, increase prepaid_balance for subscription_id
-        let _ = (env, subscription_id, amount);
+
+        let mut sub = Self::get_subscription(env.clone(), subscription_id)?;
+        if subscriber != sub.subscriber {
+            return Err(Error::Unauthorized);
+        }
+
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "token"))
+            .unwrap();
+        let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+        token_client.transfer(&subscriber, &env.current_contract_address(), &amount);
+
+        sub.prepaid_balance += amount;
+        env.storage().instance().set(&subscription_id, &sub);
+
         Ok(())
     }
 
@@ -96,8 +116,62 @@ impl SubscriptionVault {
         authorizer: Address,
     ) -> Result<(), Error> {
         authorizer.require_auth();
-        // TODO: load subscription, set status Cancelled, allow withdraw of prepaid_balance
-        let _ = (env, subscription_id);
+
+        let mut sub = Self::get_subscription(env.clone(), subscription_id)?;
+
+        if sub.status == SubscriptionStatus::Cancelled {
+            return Ok(());
+        }
+
+        if authorizer != sub.subscriber && authorizer != sub.merchant {
+            return Err(Error::Unauthorized);
+        }
+
+        sub.status = SubscriptionStatus::Cancelled;
+        env.storage().instance().set(&subscription_id, &sub);
+
+        Ok(())
+    }
+
+    /// Subscriber withdraws their remaining prepaid_balance after cancellation.
+    pub fn withdraw_subscriber_funds(
+        env: Env,
+        subscription_id: u32,
+        subscriber: Address,
+    ) -> Result<(), Error> {
+        subscriber.require_auth();
+
+        let mut sub = Self::get_subscription(env.clone(), subscription_id)?;
+
+        if subscriber != sub.subscriber {
+            return Err(Error::Unauthorized);
+        }
+
+        // Optionally require it to be Cancelled, or let them withdraw any unused anytime?
+        // Let's require Cancelled for now to fit the cancel -> refund flow cleanly.
+        if sub.status != SubscriptionStatus::Cancelled {
+            return Err(Error::Unauthorized); // Or another error, e.g. InvalidStatus
+        }
+
+        let amount_to_refund = sub.prepaid_balance;
+        if amount_to_refund > 0 {
+            sub.prepaid_balance = 0;
+            env.storage().instance().set(&subscription_id, &sub);
+
+            let token_addr: Address = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&env, "token"))
+                .unwrap();
+            let token_client = soroban_sdk::token::Client::new(&env, &token_addr);
+
+            token_client.transfer(
+                &env.current_contract_address(),
+                &subscriber,
+                &amount_to_refund,
+            );
+        }
+
         Ok(())
     }
 
