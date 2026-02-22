@@ -161,10 +161,11 @@ fn test_can_transition_helper() {
 fn test_get_allowed_transitions() {
     // Active
     let active_targets = get_allowed_transitions(&SubscriptionStatus::Active);
-    assert_eq!(active_targets.len(), 3);
+    assert_eq!(active_targets.len(), 4);
     assert!(active_targets.contains(&SubscriptionStatus::Paused));
     assert!(active_targets.contains(&SubscriptionStatus::Cancelled));
     assert!(active_targets.contains(&SubscriptionStatus::InsufficientBalance));
+    assert!(active_targets.contains(&SubscriptionStatus::GracePeriod));
 
     // Paused
     let paused_targets = get_allowed_transitions(&SubscriptionStatus::Paused);
@@ -196,7 +197,7 @@ fn setup_test_env() -> (Env, SubscriptionVaultClient<'static>, Address, Address)
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let min_topup = 1_000000i128; // 1 USDC
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     (env, client, token, admin)
 }
@@ -270,7 +271,7 @@ fn test_init_with_min_topup() {
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let min_topup = 1_000000i128; // 1 USDC
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     assert_eq!(client.get_min_topup(), min_topup);
 }
@@ -601,7 +602,7 @@ fn setup(env: &Env, interval_seconds: u64) -> (SubscriptionVaultClient<'static>,
     let client = SubscriptionVaultClient::new(env, &contract_id);
     let token = Address::generate(env);
     let admin = Address::generate(env);
-    client.init(&token, &admin, &1_000000i128);
+    client.init(&token, &admin, &1_000000i128, &0);
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
     let id =
@@ -746,7 +747,7 @@ fn test_min_topup_below_threshold() {
     let subscriber = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     let result = client.try_deposit_funds(&0, &subscriber, &4_999999);
     assert!(result.is_err());
@@ -761,7 +762,7 @@ fn test_charge_subscription_auth() {
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let min_topup = 1_000000i128;
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     // Test authorized call
     env.mock_all_auths();
@@ -786,7 +787,7 @@ fn test_charge_subscription_unauthorized() {
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let min_topup = 1_000000i128;
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     // Create a subscription so ID 0 exists (using mock_all_auths for setup)
     let subscriber = Address::generate(&env);
@@ -819,7 +820,7 @@ fn test_charge_subscription_admin() {
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let min_topup = 1_000000i128;
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     // Create a subscription so ID 0 exists (using mock_all_auths for setup)
     let subscriber = Address::generate(&env);
@@ -856,7 +857,7 @@ fn test_min_topup_exactly_at_threshold() {
     let merchant = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
     client.create_subscription(&subscriber, &merchant, &1000i128, &86400u64, &false);
 
     let result = client.try_deposit_funds(&0, &subscriber, &min_topup);
@@ -876,7 +877,7 @@ fn test_min_topup_above_threshold() {
     let merchant = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
     client.create_subscription(&subscriber, &merchant, &1000i128, &86400u64, &false);
 
     let result = client.try_deposit_funds(&0, &subscriber, &10_000000);
@@ -895,7 +896,7 @@ fn test_set_min_topup_by_admin() {
     let initial_min = 1_000000i128;
     let new_min = 10_000000i128;
 
-    client.init(&token, &admin, &initial_min);
+    client.init(&token, &admin, &initial_min, &0);
     assert_eq!(client.get_min_topup(), initial_min);
 
     client.set_min_topup(&admin, &new_min);
@@ -914,7 +915,7 @@ fn test_set_min_topup_unauthorized() {
     let non_admin = Address::generate(&env);
     let min_topup = 1_000000i128;
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &admin, &min_topup, &0);
 
     let result = client.try_set_min_topup(&non_admin, &5_000000);
     assert!(result.is_err());
@@ -981,7 +982,7 @@ fn setup_batch_env(env: &Env) -> (SubscriptionVaultClient<'static>, Address, u32
     let client = SubscriptionVaultClient::new(env, &contract_id);
     let token = Address::generate(env);
     let admin = Address::generate(env);
-    client.init(&token, &admin, &1_000000i128);
+    client.init(&token, &admin, &1_000000i128, &0);
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
     let id0 = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false);
@@ -1023,7 +1024,7 @@ fn test_batch_charge_partial_failure() {
     let client = SubscriptionVaultClient::new(&env, &contract_id);
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
-    client.init(&token, &admin, &1_000000i128);
+    client.init(&token, &admin, &1_000000i128, &0);
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
     let id0 = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false);
@@ -1041,5 +1042,121 @@ fn test_batch_charge_partial_failure() {
     assert_eq!(
         results.get(1).unwrap().error_code,
         Error::InsufficientBalance.to_code()
+    );
+}
+
+#[test]
+fn test_grace_period_transition_and_recovery() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    // Configure with 7 days grace period
+    let grace_duration = 7 * 24 * 60 * 60;
+    client.init(&token, &admin, &1_000000i128, &grace_duration);
+
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let amount = 10_000_000i128;
+    let id = client.create_subscription(&subscriber, &merchant, &amount, &INTERVAL, &false);
+
+    // Initial deposit for 1 interval
+    client.deposit_funds(&id, &subscriber, &amount);
+
+    // 1st interval charge: Succeeds
+    env.ledger().set_timestamp(T0 + INTERVAL);
+    client.charge_subscription(&id);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Active
+    );
+
+    // 2nd interval charge: Fails, but within grace period
+    let due_date = T0 + 2 * INTERVAL;
+    env.ledger().set_timestamp(due_date + 10);
+    let mut ids = SorobanVec::new(&env);
+    ids.push_back(id);
+    let results = client.batch_charge(&ids);
+    assert_eq!(
+        results.get(0).unwrap().error_code,
+        Error::InsufficientBalance.to_code()
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::GracePeriod
+    );
+
+    // Third charge attempt still in grace period
+    env.ledger().set_timestamp(due_date + 20);
+    let results2 = client.batch_charge(&ids);
+    assert_eq!(
+        results2.get(0).unwrap().error_code,
+        Error::InsufficientBalance.to_code()
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::GracePeriod
+    );
+
+    // Subscriber deposits funds during grace period
+    client.deposit_funds(&id, &subscriber, &amount);
+
+    // Recovery charge succeeds and puts it back to active
+    env.ledger().set_timestamp(due_date + 30);
+    client.charge_subscription(&id);
+    let sub = client.get_subscription(&id);
+    assert_eq!(sub.status, SubscriptionStatus::Active);
+    // last payment timestamp is now
+    assert_eq!(sub.last_payment_timestamp, due_date + 30);
+}
+
+#[test]
+fn test_grace_period_expiration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    let grace_duration = 7 * 24 * 60 * 60;
+    client.init(&token, &admin, &1_000000i128, &grace_duration);
+
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let id = client.create_subscription(&subscriber, &merchant, &10_000_000i128, &INTERVAL, &false);
+
+    // Due date is T0 + INTERVAL
+    let due_date = T0 + INTERVAL;
+
+    // Fails charge at due_date + 1 sec -> goes to GracePeriod
+    env.ledger().set_timestamp(due_date + 1);
+    let mut ids = SorobanVec::new(&env);
+    ids.push_back(id);
+    let results = client.batch_charge(&ids);
+    assert_eq!(
+        results.get(0).unwrap().error_code,
+        Error::InsufficientBalance.to_code()
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::GracePeriod
+    );
+
+    // Fails charge after grace expires -> goes to InsufficientBalance
+    env.ledger().set_timestamp(due_date + grace_duration + 1);
+    let results2 = client.batch_charge(&ids);
+    assert_eq!(
+        results2.get(0).unwrap().error_code,
+        Error::InsufficientBalance.to_code()
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::InsufficientBalance
     );
 }

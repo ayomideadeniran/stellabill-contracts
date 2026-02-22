@@ -18,8 +18,14 @@ pub struct SubscriptionVault;
 
 #[contractimpl]
 impl SubscriptionVault {
-    pub fn init(env: Env, token: Address, admin: Address, min_topup: i128) -> Result<(), Error> {
-        admin::do_init(&env, token, admin, min_topup)
+    pub fn init(
+        env: Env,
+        token: Address,
+        admin: Address,
+        min_topup: i128,
+        grace_period: u64,
+    ) -> Result<(), Error> {
+        admin::do_init(&env, token, admin, min_topup, grace_period)
     }
 
     pub fn set_min_topup(env: Env, admin: Address, min_topup: i128) -> Result<(), Error> {
@@ -28,6 +34,14 @@ impl SubscriptionVault {
 
     pub fn get_min_topup(env: Env) -> Result<i128, Error> {
         admin::get_min_topup(&env)
+    }
+
+    pub fn set_grace_period(env: Env, admin: Address, grace_period: u64) -> Result<(), Error> {
+        admin::do_set_grace_period(&env, admin, grace_period)
+    }
+
+    pub fn get_grace_period(env: Env) -> Result<u64, Error> {
+        admin::get_grace_period(&env)
     }
 
     pub fn create_subscription(
@@ -100,11 +114,7 @@ impl SubscriptionVault {
         subscription::do_resume_subscription(&env, subscription_id, authorizer)
     }
 
-    pub fn withdraw_merchant_funds(
-        env: Env,
-        merchant: Address,
-        amount: i128,
-    ) -> Result<(), Error> {
+    pub fn withdraw_merchant_funds(env: Env, merchant: Address, amount: i128) -> Result<(), Error> {
         merchant::withdraw_merchant_funds(&env, merchant, amount)
     }
 
