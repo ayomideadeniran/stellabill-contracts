@@ -1043,3 +1043,723 @@ fn test_batch_charge_partial_failure() {
         Error::InsufficientBalance.to_code()
     );
 }
+
+// =============================================================================
+// Property-Based (Fuzz-Style) Tests
+// =============================================================================
+//
+// proptest/quickcheck cannot be added as dev-dependencies: getrandom's feature
+// requirements conflict with soroban-sdk on the wasm32-unknown-unknown target,
+// and the contract uses #![no_std]. Instead, a self-contained seeded XorShift64
+// PRNG drives parameterised loops. Same MASTER_SEED → same inputs → failures
+// are fully reproducible in CI without any external fuzzing infrastructure.
+//
+// Each of the 15 tests uses seed = MASTER_SEED.wrapping_add(test_index) so all
+// tests draw from independent pseudo-random sequences with no correlation.
+//
+// To isolate a failing iteration: note the iteration index N in the panic
+// message, reduce ITERATIONS to N+1, and re-run to see the exact inputs.
+
+/// Master seed for all property tests. Change this to explore a different
+/// region of the input space while keeping full determinism.
+const MASTER_SEED: u64 = 0x5EED_F00D_CAFE_BABE;
+
+/// Number of iterations per property test. 100 balances coverage vs. runtime.
+/// Reduce temporarily when debugging a specific failing iteration.
+const ITERATIONS: usize = 100;
+
+// -----------------------------------------------------------------------------
+// XorShift64 PRNG
+// -----------------------------------------------------------------------------
+
+/// Deterministic seeded pseudo-random number generator (XorShift64).
+/// Period 2^64-1. No dependencies, no OS entropy, works in no_std and wasm32.
+struct TestRng(u64);
+
+impl TestRng {
+    fn new(seed: u64) -> Self {
+        // XorShift64 is undefined for state 0.
+        assert!(seed != 0, "TestRng seed must be non-zero");
+        TestRng(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    /// Returns a value in `[0, n)`. Returns 0 when n == 0.
+    fn next_range_u64(&mut self, n: u64) -> u64 {
+        if n == 0 {
+            return 0;
+        }
+        self.next_u64() % n
+    }
+
+    /// Returns a u64 in `[lo, hi]` inclusive.
+    fn next_u64_in(&mut self, lo: u64, hi: u64) -> u64 {
+        lo + self.next_range_u64(hi - lo + 1)
+    }
+
+    /// Returns an i128 in `[lo, hi]` inclusive.
+    fn next_i128_in(&mut self, lo: i128, hi: i128) -> i128 {
+        lo + self.next_range_u64((hi - lo) as u64 + 1) as i128
+    }
+
+    /// Returns a usize in `[0, n)`.
+    fn next_range_usize(&mut self, n: usize) -> usize {
+        self.next_range_u64(n as u64) as usize
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Shared helper: inject arbitrary subscription state into a fresh contract env
+// -----------------------------------------------------------------------------
+
+/// Create a fresh contract environment and inject a `Subscription` with the
+/// given field values directly into instance storage, bypassing the normal
+/// `create_subscription` + `deposit_funds` path (which enforces min_topup and
+/// zeroes the initial balance). Returns `(env, client, subscription_id)`.
+///
+/// The helper sets `env.ledger().timestamp()` to `t0` before creating the
+/// subscription slot so that `last_payment_timestamp` matches `t0`.
+fn setup_property_env(
+    amount: i128,
+    balance: i128,
+    interval_seconds: u64,
+    t0: u64,
+    status: SubscriptionStatus,
+) -> (Env, SubscriptionVaultClient<'static>, u32) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(t0);
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let token = Address::generate(&env);
+    let admin = Address::generate(&env);
+    // min_topup = 1 so no deposit call is needed.
+    client.init(&token, &admin, &1i128);
+
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    // Allocate a storage slot with a minimal subscription (amount=1, interval=1).
+    let id = client.create_subscription(&subscriber, &merchant, &1i128, &1u64, &false);
+
+    // Overwrite the slot with the desired test values.
+    let sub = Subscription {
+        subscriber,
+        merchant,
+        amount,
+        interval_seconds,
+        last_payment_timestamp: t0,
+        status,
+        prepaid_balance: balance,
+        usage_enabled: false,
+    };
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&id, &sub);
+    });
+
+    (env, client, id)
+}
+
+// =============================================================================
+// P-01: Balance conservation after a successful charge
+// =============================================================================
+// Invariant: for any amount and prepaid_balance >= amount, a successful charge
+// reduces prepaid_balance by exactly `amount` — no rounding, no drift.
+
+#[test]
+fn prop_balance_conservation_after_charge() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(1));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let extra = rng.next_i128_in(0, 100_000_000_000);
+        let balance = amount + extra; // balance >= amount → charge will succeed
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let delay = rng.next_u64_in(0, interval); // advance by interval + delay
+        let now = t0 + interval + delay;
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        client.charge_subscription(&id);
+
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(
+            sub_after.prepaid_balance,
+            balance - amount,
+            "P-01 iter {i}: balance conservation failed (amount={amount}, balance={balance}, interval={interval})"
+        );
+    }
+}
+
+// =============================================================================
+// P-02: No double-charge at the same timestamp
+// =============================================================================
+// Invariant: a second charge at the identical ledger timestamp that a successful
+// charge used must always return IntervalNotElapsed.
+
+#[test]
+fn prop_no_double_charge_same_timestamp() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(2));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let balance = amount * 4; // plenty for multiple charges
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let now = t0 + interval; // exactly at the boundary
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        // First charge must succeed.
+        client.charge_subscription(&id);
+
+        // Second charge at the same timestamp must fail.
+        let result = client.try_charge_subscription(&id);
+        assert_eq!(
+            result,
+            Err(Ok(Error::IntervalNotElapsed)),
+            "P-02 iter {i}: double charge was not rejected (interval={interval}, now={now})"
+        );
+
+        // Storage must still reflect only the first charge.
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(
+            sub_after.last_payment_timestamp, now,
+            "P-02 iter {i}: last_payment_timestamp changed on rejected charge"
+        );
+    }
+}
+
+// =============================================================================
+// P-03: charge_subscription returns InsufficientBalance when balance < amount
+// =============================================================================
+// Invariant: whenever prepaid_balance < amount and the subscription is Active
+// (with enough time elapsed), charge_subscription must return the
+// InsufficientBalance error.
+//
+// Note: Soroban rolls back all storage writes made during a failed contract
+// invocation (even contracterror variants), so the persisted status after a
+// try_* failure remains unchanged. We therefore only assert the error code, not
+// the post-call storage state.
+
+#[test]
+fn prop_status_becomes_insufficient_when_balance_low() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(3));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(2, 100_000_000_000);
+        let deficit = rng.next_i128_in(1, amount); // balance = amount - deficit < amount
+        let balance = amount - deficit;
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let now = t0 + interval;
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        let result = client.try_charge_subscription(&id);
+        assert_eq!(
+            result,
+            Err(Ok(Error::InsufficientBalance)),
+            "P-03 iter {i}: expected InsufficientBalance (amount={amount}, balance={balance})"
+        );
+    }
+}
+
+// =============================================================================
+// P-04: Status remains Active after a successful charge
+// =============================================================================
+// Invariant: a successful charge must not change the subscription status.
+
+#[test]
+fn prop_status_stays_active_after_successful_charge() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(4));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let extra = rng.next_i128_in(0, 100_000_000_000);
+        let balance = amount + extra;
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let now = t0 + interval;
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        client.charge_subscription(&id);
+
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(
+            sub_after.status,
+            SubscriptionStatus::Active,
+            "P-04 iter {i}: status changed after successful charge"
+        );
+    }
+}
+
+// =============================================================================
+// P-05: last_payment_timestamp is set to current ledger time (sliding window)
+// =============================================================================
+// Invariant: after a successful charge, last_payment_timestamp == now, NOT
+// t0 + interval. This is the sliding-window reset documented in the billing
+// interval tests — a late charge does not "catch up" the clock artificially.
+
+#[test]
+fn prop_timestamp_set_to_current_after_charge() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(5));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let balance = amount * 3;
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        // now is at or after the interval boundary (possibly much later).
+        let extra = rng.next_u64_in(0, interval);
+        let now = t0 + interval + extra;
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        client.charge_subscription(&id);
+
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(
+            sub_after.last_payment_timestamp, now,
+            "P-05 iter {i}: timestamp not updated to current ledger time (t0={t0}, interval={interval}, extra={extra})"
+        );
+    }
+}
+
+// =============================================================================
+// P-06: Non-Active subscriptions always reject a charge with NotActive
+// =============================================================================
+// Invariant: regardless of balance, amount, or time, charging a Paused,
+// Cancelled, or InsufficientBalance subscription must return NotActive and must
+// not modify any storage field.
+
+#[test]
+fn prop_non_active_status_always_rejects_charge() {
+    let non_active_statuses = [
+        SubscriptionStatus::Paused,
+        SubscriptionStatus::Cancelled,
+        SubscriptionStatus::InsufficientBalance,
+    ];
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(6));
+    for i in 0..ITERATIONS {
+        let status_idx = rng.next_range_usize(3);
+        let status = non_active_statuses[status_idx].clone();
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let balance = amount * 10; // plenty — so balance is never the cause
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let now = t0 + interval * 2; // well past boundary — time is never the cause
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, status.clone());
+        env.ledger().set_timestamp(now);
+
+        let result = client.try_charge_subscription(&id);
+        assert_eq!(
+            result,
+            Err(Ok(Error::NotActive)),
+            "P-06 iter {i}: expected NotActive for status {:?}", status
+        );
+
+        // Storage must be completely unchanged.
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(
+            sub_after.prepaid_balance, balance,
+            "P-06 iter {i}: balance changed on NotActive rejection"
+        );
+        assert_eq!(
+            sub_after.last_payment_timestamp, t0,
+            "P-06 iter {i}: timestamp changed on NotActive rejection"
+        );
+    }
+}
+
+// =============================================================================
+// P-07: Charging before the interval elapses always returns IntervalNotElapsed
+// =============================================================================
+// Invariant: for any now < last_payment_timestamp + interval_seconds, charge
+// returns IntervalNotElapsed and leaves storage untouched.
+
+#[test]
+fn prop_interval_guard_rejects_early_charge() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(7));
+    for i in 0..ITERATIONS {
+        let interval = rng.next_u64_in(2, 365 * 24 * 3600); // ≥2 so we can pick an "early" now
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        // now is strictly before t0 + interval.
+        let now = t0 + rng.next_u64_in(0, interval - 1);
+        let amount = rng.next_i128_in(1, 1_000_000_000);
+        let balance = amount * 100; // balance is never the limiting factor
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        let result = client.try_charge_subscription(&id);
+        assert_eq!(
+            result,
+            Err(Ok(Error::IntervalNotElapsed)),
+            "P-07 iter {i}: expected IntervalNotElapsed (t0={t0}, interval={interval}, now={now})"
+        );
+
+        // Both balance and timestamp must be unchanged.
+        let sub_after = client.get_subscription(&id);
+        assert_eq!(
+            sub_after.prepaid_balance, balance,
+            "P-07 iter {i}: balance changed on early charge"
+        );
+        assert_eq!(
+            sub_after.last_payment_timestamp, t0,
+            "P-07 iter {i}: timestamp changed on early charge"
+        );
+    }
+}
+
+// =============================================================================
+// P-08: Overflow protection — t0 + interval_seconds near u64::MAX returns Overflow
+// =============================================================================
+// Invariant: when last_payment_timestamp + interval_seconds would overflow u64,
+// charge_one must return Error::Overflow rather than panicking or wrapping.
+
+#[test]
+fn prop_overflow_protection_timestamp_addition() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(8));
+    let mut tested = 0usize;
+    for _ in 0..1000 {
+        // Pick a t0 near u64::MAX and an interval that will overflow.
+        let t0 = rng.next_u64_in(u64::MAX - 10_000, u64::MAX);
+        let interval = rng.next_u64_in(1, u64::MAX);
+        let (_, overflows) = t0.overflowing_add(interval);
+        if !overflows {
+            continue; // skip non-overflowing pairs
+        }
+
+        let amount = rng.next_i128_in(1, 1_000_000_000);
+        let balance = amount * 10;
+        // now can be anything — the overflow is caught before the comparison.
+        let now = rng.next_u64_in(0, u64::MAX / 2);
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        let result = client.try_charge_subscription(&id);
+        assert_eq!(
+            result,
+            Err(Ok(Error::Overflow)),
+            "P-08: expected Overflow (t0={t0}, interval={interval})"
+        );
+
+        tested += 1;
+        if tested >= ITERATIONS {
+            break;
+        }
+    }
+    assert!(
+        tested > 0,
+        "P-08: no overflowing (t0, interval) pairs generated — adjust ranges"
+    );
+}
+
+// =============================================================================
+// P-09: prepaid_balance is never negative after a successful charge
+// =============================================================================
+// Invariant: for all successful charges (balance >= amount), the resulting
+// prepaid_balance is always >= 0. Complements P-01 by explicitly asserting
+// the non-negative property rather than exact equality.
+
+#[test]
+fn prop_balance_never_goes_negative_after_charge() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(9));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let extra = rng.next_i128_in(0, 100_000_000_000);
+        let balance = amount + extra;
+        let interval = rng.next_u64_in(1, 365 * 24 * 3600);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let now = t0 + interval;
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        client.charge_subscription(&id);
+
+        let sub_after = client.get_subscription(&id);
+        assert!(
+            sub_after.prepaid_balance >= 0,
+            "P-09 iter {i}: balance went negative: {} (amount={amount}, balance={balance})",
+            sub_after.prepaid_balance
+        );
+    }
+}
+
+// =============================================================================
+// P-10: State machine only makes valid transitions
+// =============================================================================
+// Invariant: after any single operation (charge, pause, resume, cancel), the
+// resulting status is either the same as before or is a member of
+// get_allowed_transitions(status_before). No "impossible" status appears.
+
+#[test]
+fn prop_state_machine_only_makes_valid_transitions() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(10));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 1_000_000_000);
+        let balance = amount * 10;
+        let interval = rng.next_u64_in(1, 86400);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+        let now = t0 + interval;
+
+        let (env, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+        env.ledger().set_timestamp(now);
+
+        let status_before = client.get_subscription(&id).status;
+
+        // Pick a random operation: 0=charge, 1=pause, 2=resume, 3=cancel
+        let op = rng.next_range_usize(4);
+        let authorizer = Address::generate(&env);
+        // We don't care whether the operation succeeds or fails — only that the
+        // resulting status is valid per the state machine.
+        let _ = match op {
+            0 => client.try_charge_subscription(&id).map(|_| ()),
+            1 => client.try_pause_subscription(&id, &authorizer).map(|_| ()),
+            2 => client.try_resume_subscription(&id, &authorizer).map(|_| ()),
+            _ => client.try_cancel_subscription(&id, &authorizer).map(|_| ()),
+        };
+
+        let status_after = client.get_subscription(&id).status;
+
+        let allowed = get_allowed_transitions(&status_before);
+        let valid = allowed.contains(&status_after) || status_before == status_after;
+        assert!(
+            valid,
+            "P-10 iter {i}: invalid transition {:?} → {:?} (op={op})",
+            status_before, status_after
+        );
+    }
+}
+
+// =============================================================================
+// P-11: Batch isolation — a failure at one index does not affect its neighbours
+// =============================================================================
+// Invariant: in a batch of N subscriptions where exactly one has insufficient
+// balance (the "fail subscription"), all others must succeed independently and
+// their storage must reflect a successful charge.
+
+#[test]
+fn prop_batch_isolation_failure_does_not_contaminate() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(11));
+    for i in 0..50 {
+        let batch_size = rng.next_u64_in(2, 8) as usize;
+        let fail_idx = rng.next_range_usize(batch_size);
+        let amount: i128 = 1_000;
+        let interval = INTERVAL;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(T0);
+
+        let contract_id = env.register(SubscriptionVault, ());
+        let client = SubscriptionVaultClient::new(&env, &contract_id);
+        let token = Address::generate(&env);
+        let admin = Address::generate(&env);
+        client.init(&token, &admin, &1i128);
+
+        let subscriber = Address::generate(&env);
+        let merchant = Address::generate(&env);
+
+        let mut ids: SorobanVec<u32> = SorobanVec::new(&env);
+        let mut balances = [0i128; 8]; // max batch_size is 8
+
+        for j in 0..batch_size {
+            let id = client.create_subscription(&subscriber, &merchant, &amount, &interval, &false);
+            if j == fail_idx {
+                // No deposit → prepaid_balance remains 0 → charge will fail.
+                balances[j] = 0;
+            } else {
+                client.deposit_funds(&id, &subscriber, &10_000_000i128);
+                balances[j] = 10_000_000;
+            }
+            ids.push_back(id);
+        }
+
+        env.ledger().set_timestamp(T0 + INTERVAL);
+        let results = client.batch_charge(&ids);
+
+        assert_eq!(results.len() as usize, batch_size, "P-11 iter {i}: result count mismatch");
+
+        for j in 0..batch_size {
+            let res = results.get(j as u32).unwrap();
+            let id = ids.get(j as u32).unwrap();
+            if j == fail_idx {
+                assert!(
+                    !res.success,
+                    "P-11 iter {i}: fail_idx={fail_idx} sub at {j} should have failed"
+                );
+                assert_eq!(
+                    res.error_code,
+                    Error::InsufficientBalance.to_code(),
+                    "P-11 iter {i}: wrong error code at fail_idx={fail_idx}"
+                );
+                // Storage unchanged: balance still 0.
+                let sub_after = client.get_subscription(&id);
+                assert_eq!(
+                    sub_after.prepaid_balance, 0,
+                    "P-11 iter {i}: failed sub balance changed"
+                );
+            } else {
+                assert!(
+                    res.success,
+                    "P-11 iter {i}: sub at {j} should have succeeded (fail_idx={fail_idx})"
+                );
+                // Balance reduced by exactly amount.
+                let sub_after = client.get_subscription(&id);
+                assert_eq!(
+                    sub_after.prepaid_balance,
+                    balances[j] - amount,
+                    "P-11 iter {i}: balance conservation failed for sub {j}"
+                );
+            }
+        }
+    }
+}
+
+// =============================================================================
+// P-12: estimate_topup_for_intervals always returns a non-negative value
+// =============================================================================
+// Invariant: for any amount, balance, and num_intervals, the estimate is >= 0.
+
+#[test]
+fn prop_estimate_topup_always_non_negative() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(12));
+    for i in 0..ITERATIONS {
+        let amount = rng.next_i128_in(1, 100_000_000_000);
+        let balance = rng.next_i128_in(0, 200_000_000_000);
+        let num_intervals = rng.next_u64_in(0, 50) as u32;
+        let interval = rng.next_u64_in(1, 86400);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+
+        let (_, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+
+        let topup = client.estimate_topup_for_intervals(&id, &num_intervals);
+        assert!(
+            topup >= 0,
+            "P-12 iter {i}: estimate_topup returned negative: {topup} (amount={amount}, balance={balance}, n={num_intervals})"
+        );
+    }
+}
+
+// =============================================================================
+// P-13: estimate_topup returns 0 when balance already covers the requirement
+// =============================================================================
+// Invariant: if prepaid_balance >= amount * num_intervals, topup must be 0.
+
+#[test]
+fn prop_estimate_topup_zero_when_balance_covers() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(13));
+    for i in 0..ITERATIONS {
+        let num_intervals = rng.next_u64_in(1, 20) as u32;
+        let amount = rng.next_i128_in(1, 1_000_000_000);
+        let required = amount * num_intervals as i128;
+        let extra = rng.next_i128_in(0, 1_000_000_000);
+        let balance = required + extra; // balance >= required → topup should be 0
+        let interval = rng.next_u64_in(1, 86400);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+
+        let (_, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+
+        let topup = client.estimate_topup_for_intervals(&id, &num_intervals);
+        assert_eq!(
+            topup, 0,
+            "P-13 iter {i}: expected 0 topup but got {topup} (amount={amount}, balance={balance}, n={num_intervals})"
+        );
+    }
+}
+
+// =============================================================================
+// P-14: estimate_topup equals the exact shortfall when balance is insufficient
+// =============================================================================
+// Invariant: if prepaid_balance < amount * num_intervals, topup must equal
+// (amount * num_intervals) - prepaid_balance exactly.
+
+#[test]
+fn prop_estimate_topup_equals_shortfall() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(14));
+    for i in 0..ITERATIONS {
+        let num_intervals = rng.next_u64_in(1, 50) as u32;
+        let amount = rng.next_i128_in(1, 1_000_000_000);
+        let required = amount * num_intervals as i128;
+        // balance strictly less than required
+        let balance = if required > 0 {
+            rng.next_i128_in(0, required - 1)
+        } else {
+            0
+        };
+        let expected_topup = required - balance;
+        let interval = rng.next_u64_in(1, 86400);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+
+        let (_, client, id) = setup_property_env(amount, balance, interval, t0, SubscriptionStatus::Active);
+
+        let topup = client.estimate_topup_for_intervals(&id, &num_intervals);
+        assert_eq!(
+            topup, expected_topup,
+            "P-14 iter {i}: topup mismatch (amount={amount}, balance={balance}, n={num_intervals}, required={required})"
+        );
+    }
+}
+
+// =============================================================================
+// P-15: Multi-charge cumulative balance reduction
+// =============================================================================
+// Invariant: after N consecutive successful charges, the final balance equals
+// initial_balance - (N * amount), the final timestamp equals t0 + N*interval,
+// and the status remains Active throughout.
+
+#[test]
+fn prop_multi_charge_cumulative_balance_reduction() {
+    let mut rng = TestRng::new(MASTER_SEED.wrapping_add(15));
+    for i in 0..50 {
+        let num_charges = rng.next_u64_in(2, 8) as u32;
+        let amount = rng.next_i128_in(1, 10_000_000);
+        let extra = rng.next_i128_in(0, 10_000_000);
+        let initial_balance = amount * num_charges as i128 + extra; // covers all charges
+        let interval = rng.next_u64_in(1, 86400);
+        let t0 = rng.next_u64_in(1, u64::MAX / 4);
+
+        let (env, client, id) = setup_property_env(amount, initial_balance, interval, t0, SubscriptionStatus::Active);
+
+        for charge_num in 1..=num_charges {
+            let charge_time = t0 + charge_num as u64 * interval;
+            env.ledger().set_timestamp(charge_time);
+            client.charge_subscription(&id);
+        }
+
+        let sub_after = client.get_subscription(&id);
+
+        assert_eq!(
+            sub_after.prepaid_balance,
+            initial_balance - amount * num_charges as i128,
+            "P-15 iter {i}: cumulative balance wrong (amount={amount}, n={num_charges})"
+        );
+        assert_eq!(
+            sub_after.last_payment_timestamp,
+            t0 + num_charges as u64 * interval,
+            "P-15 iter {i}: final timestamp wrong"
+        );
+        assert_eq!(
+            sub_after.status,
+            SubscriptionStatus::Active,
+            "P-15 iter {i}: status changed after {num_charges} charges"
+        );
+    }
+}
