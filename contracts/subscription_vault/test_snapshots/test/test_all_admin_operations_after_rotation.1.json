@@ -152,6 +152,14 @@
                       },
                       {
                         "key": {
+                          "symbol": "grace_period"
+                        },
+                        "val": {
+                          "u64": 43200
+                        }
+                      },
+                      {
+                        "key": {
                           "symbol": "min_topup"
                         },
                         "val": {
@@ -167,6 +175,14 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "token_decimals"
+                        },
+                        "val": {
+                          "u32": 7
                         }
                       }
                     ]

@@ -29,11 +29,12 @@ impl SubscriptionVault {
     pub fn init(
         env: Env,
         token: Address,
+        token_decimals: u32,
         admin: Address,
         min_topup: i128,
         grace_period: u64,
     ) -> Result<(), Error> {
-        admin::do_init(&env, token, admin, min_topup, grace_period)
+        admin::do_init(&env, token, token_decimals, admin, min_topup, grace_period)
     }
 
     /// Update the minimum top-up threshold. Only callable by admin.
@@ -164,7 +165,7 @@ impl SubscriptionVault {
     ///
     /// Enforces strict interval timing and replay protection.
     pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
-        charge_core::charge_one(&env, subscription_id, None)
+        charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)
     }
 
     /// Charge a metered usage amount against the subscription's prepaid balance.

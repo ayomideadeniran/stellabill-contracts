@@ -36,9 +36,12 @@ pub enum Error {
     /// The provided amount is zero or negative.
     InvalidAmount = 1006,
     /// Charge already processed for this billing period.
+    /// Charge already processed for this billing period.
     Replay = 1007,
-    /// Recovery amount is zero or negative.
+    /// Invalid amount.
     InvalidRecoveryAmount = 1008,
+    /// Already initialized.
+    AlreadyInitialized = 1009,
 }
 
 impl Error {
@@ -58,6 +61,7 @@ impl Error {
             Error::InvalidAmount => 1006,
             Error::Replay => 1007,
             Error::InvalidRecoveryAmount => 1008,
+            Error::AlreadyInitialized => 1009,
         }
     }
 }

@@ -166,10 +166,11 @@ fn test_can_transition_helper() {
 fn test_get_allowed_transitions() {
     // Active
     let active_targets = get_allowed_transitions(&SubscriptionStatus::Active);
-    assert_eq!(active_targets.len(), 3);
+    assert_eq!(active_targets.len(), 4);
     assert!(active_targets.contains(&SubscriptionStatus::Paused));
     assert!(active_targets.contains(&SubscriptionStatus::Cancelled));
     assert!(active_targets.contains(&SubscriptionStatus::InsufficientBalance));
+    assert!(active_targets.contains(&SubscriptionStatus::GracePeriod));
 
     // Paused
     let paused_targets = get_allowed_transitions(&SubscriptionStatus::Paused);
@@ -201,7 +202,7 @@ fn setup_test_env() -> (Env, SubscriptionVaultClient<'static>, Address, Address)
     let token = Address::generate(&env);
     let admin = Address::generate(&env);
     let min_topup = 1_000000i128; // 1 USDC
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &7, &admin, &min_topup, &43200);
 
     (env, client, token, admin)
 }
@@ -600,7 +601,7 @@ fn test_min_topup_below_threshold() {
     let subscriber = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &7, &admin, &min_topup, &43200);
 
     let result = client.try_deposit_funds(&0, &subscriber, &4_999999);
     assert!(result.is_err());
@@ -619,7 +620,7 @@ fn test_min_topup_exactly_at_threshold() {
     let merchant = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &7, &admin, &min_topup, &43200);
     let id = client.create_subscription(
         &subscriber,
         &merchant,
@@ -645,7 +646,7 @@ fn test_min_topup_above_threshold() {
     let merchant = Address::generate(&env);
     let min_topup = 5_000000i128; // 5 USDC
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &7, &admin, &min_topup, &43200);
     let id = client.create_subscription(
         &subscriber,
         &merchant,
@@ -670,7 +671,7 @@ fn test_set_min_topup_by_admin() {
     let initial_min = 1_000000i128;
     let new_min = 10_000000i128;
 
-    client.init(&token, &admin, &initial_min);
+    client.init(&token, &7, &admin, &initial_min, &43200);
     assert_eq!(client.get_min_topup(), initial_min);
 
     client.set_min_topup(&admin, &new_min);
@@ -689,7 +690,7 @@ fn setup(env: &Env, interval: u64) -> (SubscriptionVaultClient, u32) {
 
     let token = Address::generate(env);
     let admin = Address::generate(env);
-    client.init(&token, &admin, &1_000000i128);
+    client.init(&token, &7, &admin, &1_000000i128, &43200);
 
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
@@ -721,7 +722,7 @@ fn setup_usage(env: &Env) -> (SubscriptionVaultClient, u32) {
 
     let token = Address::generate(env);
     let admin = Address::generate(env);
-    client.init(&token, &admin, &1_000000i128);
+    client.init(&token, &7, &admin, &1_000000i128, &43200);
 
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
@@ -830,7 +831,7 @@ fn test_set_min_topup_unauthorized() {
     let non_admin = Address::generate(&env);
     let min_topup = 1_000000i128;
 
-    client.init(&token, &admin, &min_topup);
+    client.init(&token, &7, &admin, &min_topup, &43200);
 
     let result = client.try_set_min_topup(&non_admin, &5_000000);
     assert!(result.is_err());
