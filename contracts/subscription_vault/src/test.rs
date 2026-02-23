@@ -3065,6 +3065,50 @@ fn test_admin_rotation_affects_recovery_operations() {
 }
 
 #[test]
+fn test_batch_charge_admin_rotation() {
+    let (env, client, _, old_admin) = setup_test_env();
+
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let amount = 10_000_000i128;
+    let interval_seconds = 30 * 24 * 60 * 60;
+
+    env.ledger().with_mut(|li| li.timestamp = T0);
+
+    let id = client.create_subscription(&subscriber, &merchant, &amount, &interval_seconds, &false);
+
+    // Seed prepaid balance and advance time so charge can succeed
+    let mut sub = client.get_subscription(&id);
+    sub.prepaid_balance = 50_000_000i128;
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&id, &sub);
+    });
+    env.ledger()
+        .with_mut(|li| li.timestamp = T0 + interval_seconds);
+
+    // Old admin can batch_charge before rotation
+    let ids = soroban_sdk::Vec::from_array(&env, [id]);
+    let results = client.batch_charge(&ids);
+    assert_eq!(results.len(), 1);
+    let r0 = results.get(0).unwrap();
+    assert!(r0.success);
+    assert_eq!(r0.error_code, 0);
+
+    // Rotate admin
+    let new_admin = Address::generate(&env);
+    client.rotate_admin(&old_admin, &new_admin);
+
+    // New admin can batch_charge after rotation (stored admin = new_admin)
+    env.ledger()
+        .with_mut(|li| li.timestamp = T0 + 2 * interval_seconds);
+    let sub2 = client.get_subscription(&id);
+    assert_eq!(sub2.status, SubscriptionStatus::Active);
+    let results2 = client.batch_charge(&ids);
+    assert_eq!(results2.len(), 1);
+    assert!(results2.get(0).unwrap().success);
+}
+
+#[test]
 fn test_multiple_admin_rotations() {
     let (env, client, _, admin1) = setup_test_env();
 
