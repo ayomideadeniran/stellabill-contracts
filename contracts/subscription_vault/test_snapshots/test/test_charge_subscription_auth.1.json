@@ -212,6 +212,14 @@
                       },
                       {
                         "key": {
+                          "symbol": "grace_period"
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
                           "symbol": "min_topup"
                         },
                         "val": {

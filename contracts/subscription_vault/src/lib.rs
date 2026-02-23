@@ -26,13 +26,20 @@ impl SubscriptionVault {
     // ── Admin / Config ───────────────────────────────────────────────────
 
     /// Initialize the contract: set token address, admin, and minimum top-up.
-    pub fn init(env: Env, token: Address, admin: Address, min_topup: i128) -> Result<(), Error> {
-        admin::do_init(&env, token, admin, min_topup)
+    pub fn init(
+        env: Env,
+        token: Address,
+        admin: Address,
+        min_topup: i128,
+        grace_period: u64,
+    ) -> Result<(), Error> {
+        admin::do_init(&env, token, admin, min_topup, grace_period)
     }
 
     /// Update the minimum top-up threshold. Only callable by admin.
     pub fn set_min_topup(env: Env, admin: Address, min_topup: i128) -> Result<(), Error> {
         admin::do_set_min_topup(&env, admin, min_topup)
+
     }
 
     /// Get the current minimum top-up threshold.
@@ -80,6 +87,14 @@ impl SubscriptionVault {
         subscription_ids: Vec<u32>,
     ) -> Result<Vec<BatchChargeResult>, Error> {
         admin::do_batch_charge(&env, &subscription_ids)
+    }
+
+    pub fn set_grace_period(env: Env, admin: Address, grace_period: u64) -> Result<(), Error> {
+        admin::do_set_grace_period(&env, admin, grace_period)
+    }
+
+    pub fn get_grace_period(env: Env) -> Result<u64, Error> {
+        admin::get_grace_period(&env)
     }
 
     // ── Subscription lifecycle ───────────────────────────────────────────
@@ -227,6 +242,16 @@ impl SubscriptionVault {
     /// Return the total number of subscriptions for a merchant.
     pub fn get_merchant_subscription_count(env: Env, merchant: Address) -> u32 {
         queries::get_merchant_subscription_count(&env, merchant)
+    }
+
+    /// Merchant-initiated one-off charge.
+    pub fn charge_one_off(
+        env: Env,
+        subscription_id: u32,
+        merchant: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        subscription::do_charge_one_off(&env, subscription_id, merchant, amount)
     }
 }
 

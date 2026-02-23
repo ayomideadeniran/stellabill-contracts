@@ -103,6 +103,8 @@ pub enum SubscriptionStatus {
     Cancelled = 2,
     /// Subscription failed due to insufficient balance for charging.
     InsufficientBalance = 3,
+    /// Subscription failed resulting in entry into grace period before suspension.
+    GracePeriod = 4,
 }
 
 /// Stores subscription details and current state.

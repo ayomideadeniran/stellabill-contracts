@@ -6,7 +6,13 @@ use crate::charge_core::charge_one;
 use crate::types::{BatchChargeResult, Error, RecoveryEvent, RecoveryReason};
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
-pub fn do_init(env: &Env, token: Address, admin: Address, min_topup: i128) -> Result<(), Error> {
+pub fn do_init(
+    env: &Env,
+    token: Address,
+    admin: Address,
+    min_topup: i128,
+    grace_period: u64,
+) -> Result<(), Error> {
     env.storage()
         .instance()
         .set(&Symbol::new(env, "token"), &token);
@@ -16,6 +22,9 @@ pub fn do_init(env: &Env, token: Address, admin: Address, min_topup: i128) -> Re
     env.storage()
         .instance()
         .set(&Symbol::new(env, "min_topup"), &min_topup);
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "grace_period"), &grace_period);
     env.events().publish(
         (Symbol::new(env, "initialized"),),
         (token, admin, min_topup),
@@ -49,6 +58,26 @@ pub fn get_min_topup(env: &Env) -> Result<i128, Error> {
         .instance()
         .get(&Symbol::new(env, "min_topup"))
         .ok_or(Error::NotFound)
+}
+
+pub fn do_set_grace_period(env: &Env, admin: Address, grace_period: u64) -> Result<(), Error> {
+    admin.require_auth();
+    let stored = require_admin(env)?;
+    if admin != stored {
+        return Err(Error::Unauthorized);
+    }
+    env.storage()
+        .instance()
+        .set(&Symbol::new(env, "grace_period"), &grace_period);
+    Ok(())
+}
+
+pub fn get_grace_period(env: &Env) -> Result<u64, Error> {
+    Ok(env
+        .storage()
+        .instance()
+        .get(&Symbol::new(env, "grace_period"))
+        .unwrap_or(0))
 }
 
 pub fn do_batch_charge(

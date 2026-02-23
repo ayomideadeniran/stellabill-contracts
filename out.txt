@@ -1,0 +1,47 @@
+warning: unused variable: `subscriber`
+   --> contracts\subscription_vault\src\test.rs:458:18
+    |
+458 | ...d, subscriber, _) =
+    |       ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_subscriber`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `env`
+   --> contracts\subscription_vault\src\test.rs:969:10
+    |
+969 | ...let (env, client, ...
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_env`
+
+
+running 47 tests
+..................... 21/47
+test::test_grace_period_expiration --- FAILED
+.. 24/47
+test::test_grace_period_transition_and_recovery --- FAILED
+......................
+failures:
+
+---- test::test_grace_period_expiration stdout ----
+
+thread 'test::test_grace_period_expiration' (29940) panicked at contracts\subscription_vault\src\test.rs:1123:5:
+assertion `left == right` failed
+  left: Active
+ right: GracePeriod
+Writing test snapshot file for test "test::test_grace_period_expiration" to "test_snapshots\\test\\test_grace_period_expiration.1.json".
+
+---- test::test_grace_period_transition_and_recovery stdout ----
+
+thread 'test::test_grace_period_transition_and_recovery' (1560) panicked at contracts\subscription_vault\src\test.rs:1080:5:
+assertion `left == right` failed
+  left: Active
+ right: GracePeriod
+Writing test snapshot file for test "test::test_grace_period_transition_and_recovery" to "test_snapshots\\test\\test_grace_period_transition_and_recovery.1.json".
+
+
+failures:
+    test::test_grace_period_expiration
+    test::test_grace_period_transition_and_recovery
+
+test result: FAILED. 45 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+error: test failed, to rerun pass `-p subscription_vault --lib`

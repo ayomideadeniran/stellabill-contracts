@@ -46,7 +46,7 @@ pub fn charge_one(
 ) -> Result<(), Error> {
     let mut sub = get_subscription(env, subscription_id)?;
 
-    if sub.status != SubscriptionStatus::Active {
+    if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::GracePeriod {
         return Err(Error::NotActive);
     }
 
@@ -86,10 +86,24 @@ pub fn charge_one(
     }
 
     if sub.prepaid_balance < sub.amount {
-        validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
-        sub.status = SubscriptionStatus::InsufficientBalance;
-        env.storage().instance().set(&subscription_id, &sub);
-        return Err(Error::InsufficientBalance);
+        let grace_duration = crate::admin::get_grace_period(env).unwrap_or(0);
+        let grace_expires = next_allowed
+            .checked_add(grace_duration)
+            .ok_or(Error::Overflow)?;
+
+        if now < grace_expires {
+            if sub.status != SubscriptionStatus::GracePeriod {
+                validate_status_transition(&sub.status, &SubscriptionStatus::GracePeriod)?;
+                sub.status = SubscriptionStatus::GracePeriod;
+                env.storage().instance().set(&subscription_id, &sub);
+            }
+            return Err(Error::InsufficientBalance);
+        } else {
+            validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;
+            sub.status = SubscriptionStatus::InsufficientBalance;
+            env.storage().instance().set(&subscription_id, &sub);
+            return Err(Error::InsufficientBalance);
+        }
     }
 
     sub.prepaid_balance = sub
@@ -97,6 +111,12 @@ pub fn charge_one(
         .checked_sub(sub.amount)
         .ok_or(Error::Overflow)?;
     sub.last_payment_timestamp = now;
+
+    if sub.status == SubscriptionStatus::GracePeriod {
+        validate_status_transition(&sub.status, &SubscriptionStatus::Active)?;
+        sub.status = SubscriptionStatus::Active;
+    }
+
     env.storage().instance().set(&subscription_id, &sub);
 
     // Record charged period and optional idempotency key (bounded storage)
