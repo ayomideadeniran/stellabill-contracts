@@ -40,7 +40,6 @@ impl SubscriptionVault {
     /// Update the minimum top-up threshold. Only callable by admin.
     pub fn set_min_topup(env: Env, admin: Address, min_topup: i128) -> Result<(), Error> {
         admin::do_set_min_topup(&env, admin, min_topup)
-
     }
 
     /// Get the current minimum top-up threshold.

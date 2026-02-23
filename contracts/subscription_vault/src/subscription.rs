@@ -149,6 +149,6 @@ pub fn do_charge_one_off(
         .ok_or(Error::Overflow)?;
 
     env.storage().instance().set(&subscription_id, &sub);
-    
+
     Ok(())
 }

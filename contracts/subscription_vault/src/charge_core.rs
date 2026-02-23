@@ -77,7 +77,6 @@ pub fn charge_one(
         }
     }
 
-
     let next_allowed = sub
         .last_payment_timestamp
         .checked_add(sub.interval_seconds)
@@ -135,7 +134,6 @@ pub fn charge_one(
             amount: sub.amount,
         },
     );
-
 
     Ok(())
 }
