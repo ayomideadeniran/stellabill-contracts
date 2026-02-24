@@ -209,6 +209,25 @@ fn setup_test_env() -> (Env, SubscriptionVaultClient<'static>, Address, Address)
     (env, client, token, admin)
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #1301)")]
+fn test_init_already_initialized() {
+    let (env, client, token, admin) = setup_test_env();
+    // Second call to init should fail
+    client.init(&token, &admin, &1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1302)")]
+fn test_not_initialized() {
+    let env = Env::default();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    // Calling any admin function before init should fail
+    client.get_admin();
+}
+
 fn create_test_subscription(
     env: &Env,
     client: &SubscriptionVaultClient,
@@ -1595,7 +1614,7 @@ fn test_cancel_subscription_unauthorized() {
     let sub_id = client.create_subscription(&subscriber, &merchant, &1000, &86400, &true);
 
     let result = client.try_cancel_subscription(&sub_id, &other);
-    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert_eq!(result, Err(Ok(Error::Forbidden)));
 }
 
 #[test]
@@ -1641,7 +1660,7 @@ fn test_withdraw_subscriber_funds() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #401)")]
+#[should_panic(expected = "Error(Contract, #403)")]
 fn test_recover_stranded_funds_unauthorized_caller() {
     let (env, client, _, _) = setup_test_env();
 
@@ -1655,7 +1674,7 @@ fn test_recover_stranded_funds_unauthorized_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1008)")]
+#[should_panic(expected = "Error(Contract, #406)")]
 fn test_recover_stranded_funds_zero_amount() {
     let (_, client, _, admin) = setup_test_env();
 
@@ -1668,7 +1687,7 @@ fn test_recover_stranded_funds_zero_amount() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #1008)")]
+#[should_panic(expected = "Error(Contract, #406)")]
 fn test_recover_stranded_funds_negative_amount() {
     let (_, client, _, admin) = setup_test_env();
 
@@ -3334,7 +3353,7 @@ fn test_rotate_admin_successful() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #401)")]
+#[should_panic(expected = "Error(Contract, #403)")]
 fn test_rotate_admin_unauthorized() {
     let (env, client, _, _) = setup_test_env();
 
