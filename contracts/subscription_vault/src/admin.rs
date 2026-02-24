@@ -7,6 +7,12 @@ use crate::types::{BatchChargeResult, Error, RecoveryEvent, RecoveryReason};
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 pub fn do_init(env: &Env, token: Address, admin: Address, min_topup: i128) -> Result<(), Error> {
+    if env.storage().instance().has(&Symbol::new(env, "admin")) {
+        return Err(Error::AlreadyInitialized);
+    }
+    if min_topup < 0 {
+        return Err(Error::InvalidAmount);
+    }
     env.storage()
         .instance()
         .set(&Symbol::new(env, "token"), &token);
@@ -27,14 +33,14 @@ pub fn require_admin(env: &Env) -> Result<Address, Error> {
     env.storage()
         .instance()
         .get(&Symbol::new(env, "admin"))
-        .ok_or(Error::Unauthorized)
+        .ok_or(Error::NotInitialized)
 }
 
 pub fn do_set_min_topup(env: &Env, admin: Address, min_topup: i128) -> Result<(), Error> {
     admin.require_auth();
     let stored = require_admin(env)?;
     if admin != stored {
-        return Err(Error::Unauthorized);
+        return Err(Error::Forbidden);
     }
     env.storage()
         .instance()
@@ -48,7 +54,7 @@ pub fn get_min_topup(env: &Env) -> Result<i128, Error> {
     env.storage()
         .instance()
         .get(&Symbol::new(env, "min_topup"))
-        .ok_or(Error::NotFound)
+        .ok_or(Error::NotInitialized)
 }
 
 pub fn do_batch_charge(
@@ -80,7 +86,7 @@ pub fn do_get_admin(env: &Env) -> Result<Address, Error> {
     env.storage()
         .instance()
         .get(&Symbol::new(env, "admin"))
-        .ok_or(Error::NotFound)
+        .ok_or(Error::NotInitialized)
 }
 
 pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) -> Result<(), Error> {
@@ -90,10 +96,10 @@ pub fn do_rotate_admin(env: &Env, current_admin: Address, new_admin: Address) ->
         .storage()
         .instance()
         .get(&Symbol::new(env, "admin"))
-        .ok_or(Error::NotFound)?;
+        .ok_or(Error::NotInitialized)?;
 
     if current_admin != stored_admin {
-        return Err(Error::Unauthorized);
+        return Err(Error::Forbidden);
     }
 
     env.storage()
@@ -121,10 +127,10 @@ pub fn do_recover_stranded_funds(
         .storage()
         .instance()
         .get(&Symbol::new(env, "admin"))
-        .ok_or(Error::NotFound)?;
+        .ok_or(Error::NotInitialized)?;
 
     if admin != stored_admin {
-        return Err(Error::Unauthorized);
+        return Err(Error::Forbidden);
     }
 
     if amount <= 0 {
